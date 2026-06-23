@@ -8,7 +8,10 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "lint": "oxlint",
+    "format:check": "oxfmt --check src/",
+    "format": "oxfmt src/"
   },
   "dependencies": {
     "@astrojs/react": "^6.0.0",
@@ -27,6 +30,8 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
+    "oxfmt": "^0.56.0",
+    "oxlint": "^1.71.0",
     "typescript": "7.0.1-rc"
   }
 }
