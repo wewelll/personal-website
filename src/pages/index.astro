@@ -1,29 +1,632 @@
 ---
 import Layout from "../layouts/Layout.astro";
+
+const SPIKO_PUBLIC_API = "https://public-api.spiko.io/v0";
+
+interface ShareClass {
+  symbol: string;
+  fundId: string;
+  tokens?: Array<{
+    network: string;
+  }>;
+}
+
+interface ShareClassTotals {
+  totalAssets: {
+    value: string;
+    currency: "EUR" | "USD" | "GBP" | "CHF" | "JPY" | "SGD";
+  };
+  totalOrders: {
+    value: string;
+    currency: "EUR" | "USD" | "GBP" | "CHF" | "JPY" | "SGD";
+  };
+  numberOfHolders: number;
+  netAssetValue?: {
+    updatedAt?: string;
+  };
+}
+
+interface ExchangeRate {
+  fxRate: string;
+}
+
+interface SpikoStats {
+  assetsLabel: string;
+  ordersLabel: string;
+  networksDetail: string;
+  updatedLabel: string;
+  isLive: boolean;
+}
+
+const fallbackSpikoStats: SpikoStats = {
+  assetsLabel: "EUR 1.5B+",
+  ordersLabel: "EUR 5B+",
+  networksDetail: "Ethereum, Polygon, Base, Arbitrum, Starknet, Stellar, Etherlink, Solana",
+  updatedLabel: "public milestone",
+  isLive: false,
+};
+
+const SPIKO_NETWORK_ORDER = [
+  "Ethereum",
+  "Polygon",
+  "Base",
+  "Arbitrum",
+  "Starknet",
+  "Stellar",
+  "Etherlink",
+  "Solana",
+];
+
+async function getJson<T>(url: string): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4_000);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new Error(`Spiko API returned ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function formatLargeEurAmount(value: number) {
+  if (value >= 1_000_000_000) {
+    const roundedDown = Math.floor((value / 1_000_000_000) * 10) / 10;
+    return `EUR ${roundedDown.toFixed(1)}B+`;
+  }
+
+  if (value >= 1_000_000) {
+    const roundedDown = Math.floor(value / 100_000_000) * 100;
+    return `EUR ${roundedDown}M+`;
+  }
+
+  return `EUR ${Math.floor(value).toLocaleString("en-US")}`;
+}
+
+function formatUpdatedAt(value: string | undefined) {
+  if (!value) {
+    return fallbackSpikoStats.updatedLabel;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+function formatNetworkNames(networks: string[]) {
+  return Array.from(new Set(networks.filter(Boolean)))
+    .sort((networkA, networkB) => {
+      const indexA = SPIKO_NETWORK_ORDER.indexOf(networkA);
+      const indexB = SPIKO_NETWORK_ORDER.indexOf(networkB);
+
+      if (indexA === -1 && indexB === -1) {
+        return networkA.localeCompare(networkB);
+      }
+
+      if (indexA === -1) {
+        return 1;
+      }
+
+      if (indexB === -1) {
+        return -1;
+      }
+
+      return indexA - indexB;
+    })
+    .join(", ");
+}
+
+async function fetchSpikoStats(): Promise<SpikoStats> {
+  try {
+    const shareClasses = await getJson<ShareClass[]>(`${SPIKO_PUBLIC_API}/share-classes/`);
+    const totals = await Promise.allSettled(
+      shareClasses.map(async (shareClass) => ({
+        shareClass,
+        totals: await getJson<ShareClassTotals>(
+          `${SPIKO_PUBLIC_API}/share-classes/${encodeURIComponent(shareClass.symbol)}/totals`,
+        ),
+      })),
+    );
+    const rows = totals
+      .flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+      .filter(({ totals }) => Number(totals.totalAssets.value) > 0);
+
+    if (rows.length === 0) {
+      return fallbackSpikoStats;
+    }
+
+    const rates = new Map<string, number>([["EUR", 1]]);
+    const currencies = Array.from(
+      new Set(
+        rows.flatMap(({ totals }) => [totals.totalAssets.currency, totals.totalOrders.currency]),
+      ),
+    );
+
+    await Promise.all(
+      currencies
+        .filter((currency) => currency !== "EUR")
+        .map(async (currency) => {
+          const row = rows.find(
+            ({ totals }) =>
+              totals.totalAssets.currency === currency || totals.totalOrders.currency === currency,
+          );
+
+          if (!row) {
+            return;
+          }
+
+          const rate = await getJson<ExchangeRate>(
+            `${SPIKO_PUBLIC_API}/exchange-rates/latest?fundId=${encodeURIComponent(
+              row.shareClass.fundId,
+            )}&baseCurrency=${currency}&quoteCurrency=EUR&fallbackToAnyOtherFund=true`,
+          );
+          rates.set(currency, Number(rate.fxRate));
+        }),
+    );
+
+    const totalAssetsInEur = rows.reduce((sum, { totals }) => {
+      const rate = rates.get(totals.totalAssets.currency);
+
+      if (!rate) {
+        return sum;
+      }
+
+      return sum + Number(totals.totalAssets.value) * rate;
+    }, 0);
+    const totalOrdersInEur = rows.reduce((sum, { totals }) => {
+      const rate = rates.get(totals.totalOrders.currency);
+
+      if (!rate) {
+        return sum;
+      }
+
+      return sum + Number(totals.totalOrders.value) * rate;
+    }, 0);
+    const latestUpdate = rows
+      .map(({ totals }) => totals.netAssetValue?.updatedAt)
+      .filter((value): value is string => Boolean(value))
+      .sort()
+      .at(-1);
+    const networksDetail = formatNetworkNames(
+      shareClasses
+        .flatMap((shareClass) => shareClass.tokens?.map(({ network }) => network) ?? [])
+        .concat("Solana"),
+    );
+
+    if (!Number.isFinite(totalAssetsInEur) || totalAssetsInEur <= 0) {
+      return fallbackSpikoStats;
+    }
+
+    return {
+      assetsLabel: formatLargeEurAmount(totalAssetsInEur),
+      ordersLabel:
+        Number.isFinite(totalOrdersInEur) && totalOrdersInEur > 0
+          ? formatLargeEurAmount(totalOrdersInEur)
+          : fallbackSpikoStats.ordersLabel,
+      networksDetail: networksDetail || fallbackSpikoStats.networksDetail,
+      updatedLabel: formatUpdatedAt(latestUpdate),
+      isLive: true,
+    };
+  } catch {
+    return fallbackSpikoStats;
+  }
+}
+
+const spikoStats = await fetchSpikoStats();
+
+const socialLinks = [
+  {
+    label: "GitHub",
+    handle: "@wewelll",
+    href: "https://github.com/wewelll",
+    iconPath:
+      "M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.2.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.8.1-.8.1-.8 1.2.1 1.9 1.3 1.9 1.3 1.1 1.8 2.8 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.4-1.3-5.4-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.3 11.3 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.9c0 .4.2.7.8.6A12 12 0 0 0 12 .3Z",
+  },
+  {
+    label: "X",
+    handle: "@SamuelBriole",
+    href: "https://x.com/SamuelBriole",
+    iconPath:
+      "M18.9 1.8h3.7l-8.1 9.3L24 23.8h-7.4l-5.8-7.6-6.6 7.6H.5l8.7-10L0 1.8h7.6l5.2 6.9 6.1-6.9Zm-1.3 19.8h2L6.5 3.9H4.3l13.3 17.7Z",
+  },
+  {
+    label: "LinkedIn",
+    handle: "samuel-briole",
+    href: "https://www.linkedin.com/in/samuel-briole/",
+    iconPath:
+      "M20.4 20.5h-3.6v-5.6c0-1.3 0-3.1-1.9-3.1s-2.2 1.5-2.2 3v5.7H9.1V9h3.4v1.6h.1a3.8 3.8 0 0 1 3.4-1.9c3.6 0 4.3 2.4 4.3 5.5v6.3ZM5.1 7.4A2.1 2.1 0 1 1 5.1 3a2.1 2.1 0 0 1 0 4.3Zm1.8 13.1H3.3V9h3.6v11.5ZM22.2 0H1.8C.8 0 0 .8 0 1.7v20.6C0 23.2.8 24 1.8 24h20.4c1 0 1.8-.8 1.8-1.7V1.7C24 .8 23.2 0 22.2 0Z",
+  },
+];
+
+const stats = [
+  {
+    value: spikoStats.assetsLabel,
+    label: "cash on the platform",
+    detail: spikoStats.networksDetail,
+    href: "https://dune.com/spiko/dashboard",
+    action: "View on Dune",
+  },
+  {
+    value: spikoStats.ordersLabel,
+    label: "total deposits & withdrawals",
+    detail: spikoStats.isLive ? `Updated ${spikoStats.updatedLabel}` : "Public milestone",
+    href: "https://dune.com/spiko/dashboard",
+    action: "View on Dune",
+  },
+  {
+    value: "8",
+    label: "people led at peak",
+    detail: "Engineering team at peak",
+    href: null,
+    action: null,
+  },
+  {
+    value: "3 years",
+    label: "from zero to scale",
+    detail: "First employee and CTO",
+    href: null,
+    action: null,
+  },
+];
+
+const highlights = [
+  {
+    eyebrow: "Architecture",
+    title: "Modern stack from day one",
+    description:
+      "Architected and built Spiko's platform from day one: Effect/TypeScript DDD services, React and Expo apps, Nx, Ory, RabbitMQ/NATS, Postgres, Qovery/Kubernetes, and multi-chain rails.",
+    iconPath:
+      "M4.5 5.5A2.5 2.5 0 0 1 7 3h10a2.5 2.5 0 0 1 2.5 2.5v4A2.5 2.5 0 0 1 17 12H7a2.5 2.5 0 0 1-2.5-2.5v-4ZM7 5a.5.5 0 0 0-.5.5v4A.5.5 0 0 0 7 10h10a.5.5 0 0 0 .5-.5v-4A.5.5 0 0 0 17 5H7Zm-2.5 9.5A2.5 2.5 0 0 1 7 12h10a2.5 2.5 0 0 1 2.5 2.5v4A2.5 2.5 0 0 1 17 21H7a2.5 2.5 0 0 1-2.5-2.5v-4ZM7 14a.5.5 0 0 0-.5.5v4A.5.5 0 0 0 7 19h10a.5.5 0 0 0 .5-.5v-4A.5.5 0 0 0 17 14H7Zm2-6.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm0 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z",
+  },
+  {
+    eyebrow: "Open source",
+    title: "effect-messaging",
+    description:
+      "A message broker toolkit for Effect, extracted from Spiko's RabbitMQ/NATS needs with publishers, subscribers, reconnect handling, JetStream, and trace propagation.",
+    href: "https://github.com/spiko-tech/effect-messaging",
+    iconPath: socialLinks[0].iconPath,
+  },
+  {
+    eyebrow: "Automation",
+    title: "Engineering agents for review and incidents",
+    description:
+      "Built custom opencode agents and skills for PR review, incident investigation, and autonomous triage across GitHub, Datadog, and BigQuery production data.",
+    iconPath:
+      "M12 2.5 13.9 8l5.8-1.8-3.4 5.1 5 3.4-6 .4 1.8 5.8-5.1-3.4-5.1 3.4 1.8-5.8-6-.4 5-3.4-3.4-5.1L10.1 8 12 2.5Z",
+  },
+];
+
+const publicWork = [
+  {
+    type: "Article",
+    title: "Why We Chose Effect for Building Spiko",
+    description:
+      "A practical explanation of how Effect shaped Spiko's TypeScript architecture, error handling, dependency management, and observability.",
+    href: "https://tech.spiko.io/posts/why-we-chose-effect/",
+    logo: {
+      src: "/effect-logo.svg",
+      alt: "Effect logo",
+    },
+  },
+  {
+    type: "Video",
+    title: "Spiko x Effect",
+    description:
+      "A conversation with the Effect team about using Effect in production at Spiko.",
+    href: "https://www.youtube.com/watch?v=lFOHVZnJLew",
+    thumbnail: "https://img.youtube.com/vi/lFOHVZnJLew/0.jpg",
+    thumbnailAlt: "Thumbnail for the Spiko and Effect video",
+  },
+  {
+    type: "Video",
+    title: "Spiko x Qovery",
+    description:
+      "A partner story about using Qovery to operate Kubernetes-backed infrastructure.",
+    href: "https://www.youtube.com/watch?v=eR4UVf6PQtU",
+    thumbnail: "https://i.ytimg.com/vi/eR4UVf6PQtU/maxresdefault.jpg",
+    thumbnailAlt: "Thumbnail for the Spiko and Qovery video",
+  },
+];
 ---
 
-<Layout title="Samuel Briole">
-  <main>
-    <h1 class="scroll-m-20 text-4xl font-extrabold tracking-tight lg:text-5xl">
-      Samuel Briole
-    </h1>
-    <p class="leading-7 [&:not(:first-child)]:mt-6">
-      Physicist turned software engineer. I'm all about creating and sharing
-      exceptional things.
-    </p>
-    <p class="leading-7 [&:not(:first-child)]:mt-6">
-      I work at <a
-        href="https://spiko.tech/"
-        target="_blank"
-        class="font-medium text-primary underline underline-offset-4">Spiko</a
-      > as CTO. Our mission is to make capital markets infrastructure open source
-      and composable.
-    </p>
-    <p class="leading-7 [&:not(:first-child)]:mt-6">
-      I'm passionate about music, nature and, of course, cheese.
-    </p>
-    <p class="leading-7 [&:not(:first-child)]:mt-6">
-      Welcome to my website, more content coming soon!
-    </p>
-  </main>
+<Layout
+  title="Samuel Briole - Software engineer"
+  description="Samuel Briole is a physicist turned software engineer focused on reliable systems, AI-native workflows, and practical engineering automation."
+>
+  <div class="relative overflow-hidden">
+    <header class="mx-auto flex w-full max-w-7xl items-center justify-between px-5 py-5 sm:px-8 lg:px-10 lg:py-7">
+      <a
+        href="/"
+        class="group inline-flex items-center gap-3 rounded-full border border-white/10 bg-white/[0.03] px-3 py-2 text-sm font-medium text-white/85 shadow-2xl shadow-black/20 backdrop-blur transition hover:border-primary/40 hover:text-white"
+        aria-label="Samuel Briole home"
+      >
+        <span class="flex size-8 items-center justify-center rounded-full bg-primary text-xs font-black tracking-tight text-primary-foreground">
+          SB
+        </span>
+        <span>Samuel Briole</span>
+      </a>
+
+      <nav class="hidden items-center gap-6 text-sm text-muted-foreground sm:flex">
+        <a class="transition hover:text-primary" href="#spiko">Work</a>
+        <a class="transition hover:text-primary" href="#talks-writing">Talks & Writing</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="mx-auto grid w-full max-w-7xl gap-10 px-5 pb-16 pt-8 sm:px-8 sm:pb-20 lg:min-h-[calc(100svh-6rem)] lg:grid-cols-[1.04fr_0.96fr] lg:items-center lg:gap-14 lg:px-10 lg:pb-20 lg:pt-4">
+        <div>
+          <p class="mb-5 inline-flex rounded-full border border-primary/25 bg-primary/10 px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-primary shadow-lg shadow-primary/5 sm:tracking-[0.3em]">
+            Enthusiast software builder
+          </p>
+          <h1 class="max-w-4xl text-balance text-5xl font-black leading-[0.92] tracking-[-0.06em] text-white sm:text-6xl lg:text-7xl">
+            Hi, I'm Samuel.
+          </h1>
+          <p class="mt-6 max-w-2xl text-base leading-7 text-muted-foreground sm:text-lg sm:leading-8 lg:text-xl lg:leading-9">
+            I'm a physicist turned software engineer. I helped build <a
+              href="https://www.spiko.io/"
+              target="_blank"
+              rel="noreferrer"
+              class="font-medium text-white underline decoration-primary/40 underline-offset-4 transition hover:text-primary">Spiko</a
+            > as first employee and CTO. Now I focus on AI as engineering leverage: agents for operations, better tools, and faster small teams.
+          </p>
+
+          <div class="mt-8 flex flex-wrap gap-3">
+            {
+              socialLinks.map((link) => (
+                <a
+                  href={link.href}
+                  target="_blank"
+                  rel="noreferrer"
+                  class="inline-flex items-center gap-3 rounded-full border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white shadow-xl shadow-black/10 backdrop-blur transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-primary/10"
+                  aria-label={link.label}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24" class="size-4 fill-current">
+                    <path d={link.iconPath}></path>
+                  </svg>
+                  <span>{link.label}</span>
+                  <span class="hidden font-mono text-xs text-muted-foreground sm:inline">{link.handle}</span>
+                </a>
+              ))
+            }
+          </div>
+        </div>
+
+        <aside class="relative">
+          <div class="absolute -inset-8 rounded-[3rem] bg-primary/10 blur-3xl"></div>
+          <div class="relative overflow-hidden rounded-[2rem] border border-white/10 bg-card/80 shadow-2xl shadow-black/40 backdrop-blur-xl">
+            <div class="relative overflow-hidden border-b border-white/10">
+              <img
+                src="/samuel-portrait.jpg"
+                alt="Samuel Briole in a navy suit, photographed outdoors"
+                width="1500"
+                height="1000"
+                loading="eager"
+                class="h-56 w-full object-cover object-[50%_34%] sm:h-72 lg:h-80"
+              />
+              <div class="absolute inset-0 bg-gradient-to-t from-card via-card/10 to-transparent"></div>
+              <div class="absolute bottom-5 left-5 rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm font-medium text-white shadow-xl shadow-black/20 backdrop-blur-md">
+                Samuel Briole
+              </div>
+            </div>
+
+            <div class="border-b border-white/10 px-5 py-4">
+              <div class="flex items-center gap-2">
+                <span class="size-3 rounded-full bg-red-400/80"></span>
+                <span class="size-3 rounded-full bg-amber-300/80"></span>
+                <span class="size-3 rounded-full bg-primary/80"></span>
+                <span class="ml-3 font-mono text-xs text-muted-foreground">samuel.system</span>
+              </div>
+            </div>
+
+            <div class="space-y-5 p-5 sm:p-6 lg:p-7">
+              <div>
+                <p class="font-mono text-xs uppercase tracking-[0.3em] text-primary">Focus now</p>
+                <p class="mt-3 text-3xl font-black leading-[0.98] tracking-[-0.055em] text-white sm:text-4xl">
+                  Reliable systems. Useful AI.
+                </p>
+              </div>
+
+              <div class="grid gap-2.5 rounded-2xl border border-white/10 bg-white/[0.03] p-4 font-mono text-xs text-muted-foreground sm:text-sm">
+                <p><span class="text-primary">background</span> = "physics / engineering / CTO"</p>
+                <p><span class="text-primary">craft</span> = ["TypeScript", "Effect", "systems"]</p>
+                <p><span class="text-primary">interest</span> = "AI-native products and operations"</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="spiko" class="mx-auto w-full max-w-7xl px-5 py-16 sm:px-8 lg:px-10 lg:py-24">
+        <div class="grid gap-10 lg:grid-cols-[0.78fr_1.22fr]">
+          <div>
+            <a
+              href="https://www.spiko.io/"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Visit Spiko"
+              class="inline-flex w-fit rounded-[1.25rem] border border-white/10 bg-white/[0.04] px-4 py-3 shadow-xl shadow-black/10 backdrop-blur transition hover:border-primary/35 hover:bg-white/[0.07]"
+            >
+              <img src="/spiko-logo.svg" alt="" loading="lazy" decoding="async" class="h-8 w-auto" />
+            </a>
+            <h2 class="mt-4 text-3xl font-black tracking-[-0.04em] text-white sm:text-5xl lg:text-4xl xl:text-5xl">
+              Building tokenized finance from day zero.
+            </h2>
+            <p class="mt-6 text-lg leading-8 text-muted-foreground">
+              I joined <a
+                href="https://www.spiko.io/"
+                target="_blank"
+                rel="noreferrer"
+                class="font-medium text-white underline decoration-primary/40 underline-offset-4 transition hover:text-primary">Spiko</a
+              >'s founders as the first employee and built the core platform behind regulated, tokenized cash-management products: customer-facing apps, operational workflows, and public-blockchain rails used by the business today. I also recruited and led a small, high-performing engineering team to scale it.
+            </p>
+          </div>
+
+          <div class="grid gap-4 sm:grid-cols-2">
+            {
+              stats.map((stat) => (
+                <article class="rounded-[1.5rem] border border-white/10 bg-white/[0.04] p-6 shadow-xl shadow-black/10 backdrop-blur transition hover:-translate-y-1 hover:border-primary/30">
+                  <p class="text-4xl font-black tracking-[-0.05em] text-white">{stat.value}</p>
+                  <h3 class="mt-3 text-base font-semibold text-primary">{stat.label}</h3>
+                  <p class="mt-2 text-sm leading-6 text-muted-foreground">{stat.detail}</p>
+                  {
+                    stat.href ? (
+                      <a
+                        href={stat.href}
+                        target="_blank"
+                        rel="noreferrer"
+                        class="mt-4 inline-flex text-sm font-semibold text-primary hover:underline"
+                      >
+                        {stat.action}
+                      </a>
+                    ) : null
+                  }
+                </article>
+              ))
+            }
+          </div>
+        </div>
+
+        <div class="mt-16 grid gap-5 lg:grid-cols-3">
+          {
+            highlights.map((item) => (
+              <article class="group flex min-h-72 flex-col rounded-[1.75rem] border border-white/10 bg-card/70 p-6 shadow-2xl shadow-black/20 backdrop-blur transition hover:-translate-y-1 hover:border-primary/35">
+                <div class="flex items-center justify-between gap-4">
+                  <p class="font-mono text-xs uppercase tracking-[0.25em] text-accent">{item.eyebrow}</p>
+                  <span class="flex size-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-primary shadow-lg shadow-black/10 transition group-hover:border-primary/30 group-hover:bg-primary/10">
+                    <svg aria-hidden="true" viewBox="0 0 24 24" class="size-4 fill-current">
+                      <path d={item.iconPath}></path>
+                    </svg>
+                  </span>
+                </div>
+                <h3 class="mt-5 text-2xl font-black tracking-[-0.04em] text-white">{item.title}</h3>
+                <p class="mt-4 flex-1 text-sm leading-7 text-muted-foreground">{item.description}</p>
+                {
+                  "href" in item && item.href ? (
+                    <a
+                      href={item.href}
+                      target="_blank"
+                      rel="noreferrer"
+                      class="mt-6 inline-flex text-sm font-semibold text-primary hover:underline"
+                    >
+                      View on GitHub
+                    </a>
+                  ) : null
+                }
+              </article>
+            ))
+          }
+        </div>
+
+        <div id="talks-writing" class="mt-28 scroll-mt-10 flex flex-col justify-between gap-8 border-y border-white/10 py-12 lg:flex-row lg:items-end">
+          <div>
+            <p class="font-mono text-sm uppercase tracking-[0.3em] text-primary">Talks & writing</p>
+            <h2 class="mt-4 max-w-3xl text-3xl font-black tracking-[-0.04em] text-white sm:text-5xl">
+              Writing and conversations about the systems behind <a
+                href="https://www.spiko.io/"
+                target="_blank"
+                rel="noreferrer"
+                class="underline decoration-primary/40 underline-offset-4 transition hover:text-primary">Spiko</a
+              >.
+            </h2>
+          </div>
+          <a
+            href="https://tech.spiko.io/"
+            target="_blank"
+            rel="noreferrer"
+            class="inline-flex w-fit rounded-full border border-white/10 bg-white/[0.04] px-5 py-3 text-sm font-semibold text-white transition hover:border-primary/40 hover:bg-primary/10"
+          >
+            Visit Spiko tech blog
+          </a>
+        </div>
+
+        <div class="mt-10 grid gap-5 lg:grid-cols-3">
+          {
+            publicWork.map((item) => (
+              <a
+                href={item.href}
+                target="_blank"
+                rel="noreferrer"
+                class="group rounded-[1.75rem] border border-white/10 bg-white/[0.04] p-6 shadow-xl shadow-black/10 backdrop-blur transition hover:-translate-y-1 hover:border-primary/35 hover:bg-white/[0.06]"
+              >
+                {
+                  item.logo ? (
+                    <div class="relative -mx-2 -mt-2 mb-6 flex aspect-video items-center justify-center overflow-hidden rounded-[1.25rem] border border-white/10 bg-black/30">
+                      <div class="absolute -left-10 top-4 size-40 rounded-full bg-primary/20 blur-3xl"></div>
+                      <div class="absolute -right-10 bottom-0 size-36 rounded-full bg-accent/15 blur-3xl"></div>
+                      <div class="absolute inset-0 bg-gradient-to-br from-white/[0.08] via-transparent to-black/45"></div>
+                      <img
+                        src={item.logo.src}
+                        alt={item.logo.alt}
+                        loading="eager"
+                        decoding="async"
+                        class="relative h-9 w-auto opacity-95 transition duration-500 group-hover:scale-105 group-hover:opacity-100 sm:h-11"
+                      />
+                    </div>
+                  ) : null
+                }
+                {
+                  item.thumbnail ? (
+                    <div class="relative -mx-2 -mt-2 mb-6 overflow-hidden rounded-[1.25rem] border border-white/10 bg-black/30">
+                      <img
+                        src={item.thumbnail}
+                        alt={item.thumbnailAlt}
+                        loading="eager"
+                        decoding="async"
+                        class="aspect-video w-full object-cover opacity-95 saturate-[0.9] transition duration-500 group-hover:scale-105 group-hover:opacity-100 group-hover:saturate-100"
+                      />
+                      <div class="absolute inset-0 bg-gradient-to-t from-black/45 via-black/5 to-transparent"></div>
+                      <span class="absolute bottom-4 left-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/50 px-3 py-2 text-xs font-semibold text-white backdrop-blur">
+                        <span class="flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                          <svg aria-hidden="true" viewBox="0 0 16 16" class="ml-0.5 size-3 fill-current">
+                            <path d="M4 2.75 12 8l-8 5.25v-10.5Z"></path>
+                          </svg>
+                        </span>
+                        Watch on YouTube
+                      </span>
+                    </div>
+                  ) : null
+                }
+                <span class="font-mono text-xs uppercase tracking-[0.25em] text-accent">{item.type}</span>
+                <h3 class="mt-5 text-2xl font-black tracking-[-0.04em] text-white">{item.title}</h3>
+                <p class="mt-4 text-sm leading-7 text-muted-foreground">{item.description}</p>
+                <span class="mt-8 inline-flex text-sm font-semibold text-primary group-hover:underline">
+                  Open link
+                </span>
+              </a>
+            ))
+          }
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="mx-auto flex w-full max-w-7xl flex-col gap-6 px-5 py-10 text-sm text-muted-foreground sm:px-8 md:flex-row md:items-center md:justify-between lg:px-10">
+      <p>Samuel Briole</p>
+      <div class="flex flex-wrap gap-4">
+        {
+          socialLinks.map((link) => (
+            <a
+              href={link.href}
+              target="_blank"
+              rel="noreferrer"
+              class="inline-flex items-center gap-2 transition hover:text-primary"
+              aria-label={link.label}
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" class="size-4 fill-current">
+                <path d={link.iconPath}></path>
+              </svg>
+              <span>{link.label}</span>
+            </a>
+          ))
+        }
+      </div>
+    </footer>
+  </div>
 </Layout>
