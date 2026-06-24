@@ -1,54 +1,93 @@
-# Astro Starter Kit: Basics
+# Samuel Briole Personal Website
 
+Source for [samuelbriole.com](https://samuelbriole.com), a personal website built with Astro. The site presents Samuel Briole's background, Spiko work, public writing, talks, and social links.
+
+## Stack
+
+- Astro 7 static site
+- React 19 integration for React components
+- TypeScript
+- Tailwind CSS v4 through `@tailwindcss/vite`
+- shadcn-style UI components in `src/components/ui/`
+- pnpm 11.8.0
+
+## Requirements
+
+- Node 24, matching `.nvmrc`
+- pnpm 11.8.0, matching `package.json`
+
+If you use `nvm`:
+
+```sh
+nvm use
+corepack enable
+pnpm install
 ```
-npm create astro@latest -- --template basics
-```
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/withastro/astro/tree/latest/examples/basics)
-[![Open with CodeSandbox](https://assets.codesandbox.io/github/button-edit-lime.svg)](https://codesandbox.io/p/sandbox/github/withastro/astro/tree/latest/examples/basics)
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/withastro/astro?devcontainer_path=.devcontainer/basics/devcontainer.json)
+## Commands
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+Run commands from the repository root.
 
-![just-the-basics](https://github.com/withastro/astro/assets/2244813/a0a5533c-a856-4198-8470-2d67b1d7c554)
+| Command | Description |
+| --- | --- |
+| `pnpm install` | Install dependencies |
+| `pnpm dev` | Start the local Astro dev server, usually at `http://localhost:4321` |
+| `pnpm build` | Build the production site into `dist/` |
+| `pnpm preview` | Preview the production build locally |
+| `pnpm lint` | Run `oxlint` |
+| `pnpm format:check` | Check formatting for `src/` with `oxfmt` |
+| `pnpm format` | Format `src/` with `oxfmt` |
+| `pnpm astro check` | Run Astro and TypeScript diagnostics |
 
-## 🚀 Project Structure
+## Project Structure
 
-Inside of your Astro project, you'll see the following folders and files:
-
-```
-/
+```text
+.
 ├── public/
-│   └── favicon.svg
+│   ├── CNAME
+│   ├── effect-logo.svg
+│   ├── favicon.ico
+│   ├── samuel-portrait.jpg
+│   └── spiko-logo.svg
 ├── src/
-│   ├── components/
-│   │   └── Card.astro
-│   ├── layouts/
-│   │   └── Layout.astro
-│   └── pages/
-│       └── index.astro
-└── package.json
+│   ├── components/ui/
+│   ├── layouts/Layout.astro
+│   ├── lib/utils.ts
+│   ├── pages/index.astro
+│   └── styles/globals.css
+├── astro.config.mjs
+├── package.json
+└── pnpm-workspace.yaml
 ```
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+Key files:
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
+- `src/pages/index.astro` contains the page content and build-time Spiko public stats loading.
+- `src/layouts/Layout.astro` defines the shared HTML shell, metadata, canonical URL, and global stylesheet import.
+- `src/styles/globals.css` contains Tailwind imports, theme variables, and global styles.
+- `public/` contains static files served from the site root.
 
-Any static assets, like images, can be placed in the `public/` directory.
+## Data
 
-## 🧞 Commands
+The homepage fetches public Spiko stats at build time from `https://public-api.spiko.io/v0`. If the API is unavailable or returns incomplete data, the page falls back to conservative public milestone values so builds can continue.
 
-All commands are run from the root of the project, from a terminal:
+Because the stats are rendered statically, production data freshness depends on rebuild frequency.
 
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:3000`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
+## Deployment
 
-## 👀 Want to learn more?
+The site is deployed to GitHub Pages by `.github/workflows/deploy.yaml`.
 
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+- Pushes to `main` trigger a build and deployment.
+- A daily scheduled workflow rebuilds the static site at `06:00 UTC` so build-time stats stay fresh.
+- `public/CNAME` configures the custom domain `samuelbriole.com`.
+
+## Quality Checks
+
+Before merging changes, run:
+
+```sh
+pnpm lint
+pnpm format:check
+```
+
+There is no test script in this project. Use `pnpm astro check` when you need Astro or TypeScript diagnostics.
