@@ -34,5 +34,15 @@ const canonicalUrl = new URL(Astro.url.pathname, Astro.site ?? Astro.url.origin)
   </head>
   <body class="min-h-screen bg-background text-foreground antialiased">
     <slot />
+    {
+      import.meta.env.PROD && (
+        <script
+          is:inline
+          type="module"
+          src="https://static.cloudflareinsights.com/beacon.min.js"
+          data-cf-beacon='{"token":"cf4d07e799504d028b8f59894be8a7b9"}'
+        />
+      )
+    }
   </body>
 </html>
